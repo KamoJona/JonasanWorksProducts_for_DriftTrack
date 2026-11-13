@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Star Flight XR</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #000; overflow: hidden; color: #cde; font: 14px system-ui, sans-serif; }
+    #hud { position: fixed; left: 16px; top: 16px; pointer-events: none; text-shadow: 0 0 4px #000; line-height: 1.6; }
+    #hud b { font-size: 20px; color: #fff; }
+    #credit { display: block; margin-top: 6px; font-size: 11px; opacity: .6; pointer-events: auto; }
+    #credit a { color: inherit; }
+    #pad { position: fixed; right: max(16px, env(safe-area-inset-right, 0px)); bottom: calc(40px + env(safe-area-inset-bottom, 0px));
+           display: grid; grid-template-columns: repeat(2, 64px); gap: 10px; }
+    #pad button { height: 56px; border-radius: 14px; border: 1px solid #4a6a99; background: rgba(10,25,55,.65); color: #e6efff;
+                  font: 600 15px system-ui, sans-serif; touch-action: none; user-select: none; -webkit-user-select: none; }
+    #pad button:active { background: rgba(60,110,190,.8); }
+    #pad button:focus-visible { outline: 2px solid #9cf; }
+  </style>
+  <script type="importmap">
+    { "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+    } }
+  </script>
+</head>
+<body>
+  <div id="hud">
+    <b id="speed"></b><br>
+    <span id="pos"></span><br>
+    <small id="epoch"></small><br>
+    <small>ドラッグ: 視点 / W・S・右下ボタン: 前進・後退 / ホイール・×10・÷10: 速度<br>
+    VR: トリガー(ピンチ)で指した方向へ前進 / スティック上下: 速度</small>
+<span id="credit">Star data: <a href="https://github.com/astronexus/HYG-Database">HYG Database</a> (CC BY-SA 4.0) / Earth &amp; Moon textures: three.js examples ・ <a href="./index.html">← プラネタリウムへ</a></span>
+  </div>
+  <div id="pad">
+    <button data-speed="0.1" aria-label="減速">÷10</button>
+    <button data-speed="10" aria-label="加速">×10</button>
+    <button data-move="-1">後退</button>
+    <button data-move="1">前進</button>
+  </div>
+  <script type="module" src="./main.js"></script>
+</body>
+</html>
