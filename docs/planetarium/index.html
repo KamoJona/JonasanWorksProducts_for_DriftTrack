@@ -29,6 +29,11 @@
                             border-radius: 10px; min-height: 38px; padding: 0 10px; }
     button { cursor: pointer; user-select: none; -webkit-user-select: none; }
     button[aria-pressed="true"] { background: var(--on); border-color: #6c93d0; }
+    .navbtn { display: inline-flex; align-items: center; min-height: 38px; padding: 0 12px; border-radius: 10px;
+              border: 1px solid #8a6a2c; background: rgba(60, 40, 8, .7); color: var(--accent);
+              font-weight: 600; text-decoration: none; white-space: nowrap; }
+    .navbtn:active { background: rgba(120, 85, 20, .8); }
+    .navbtn:focus-visible { outline: 2px solid #9cf; outline-offset: 1px; }
     button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid #9cf; outline-offset: 1px; }
     #rates { gap: 4px; flex-wrap: nowrap; }
     #rates button { min-width: 0; padding: 0 7px; font-size: 12.5px; white-space: nowrap; }
@@ -54,7 +59,7 @@
     <div id="sensorMsg"></div>
     <small>ドラッグ: 見回す / ホイール・ピンチ: ズーム / センサー: スマホを向けた方向の空<br>
     VR: トリガーで時間の速さを切り替え</small><br>
-    <small>Star data: <a href="https://github.com/astronexus/HYG-Database">HYG Database</a> (CC BY-SA 4.0) ・ <a href="./flight.html">宇宙へ飛び立つ →</a></small>
+    <small>Star data: <a href="https://github.com/astronexus/HYG-Database">HYG Database</a> (CC BY-SA 4.0)</small>
   </div>
 
   <div id="panel">
@@ -71,6 +76,7 @@
       <button id="sunToggle" aria-pressed="true">太陽 ON</button>
       <button id="sensorToggle" aria-pressed="false">センサー</button>
       <button id="labelToggle" aria-pressed="true">名前</button>
+      <a id="toFlight" class="navbtn" href="./flight.html">宇宙へ飛び立つ →</a>
       <select id="loc" aria-label="観測地">
         <option value="35.6812,139.7671">東京</option>
         <option value="43.0621,141.3544">札幌</option>

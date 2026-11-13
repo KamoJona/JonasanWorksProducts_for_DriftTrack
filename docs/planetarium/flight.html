@@ -16,6 +16,12 @@
                   font: 600 15px system-ui, sans-serif; touch-action: none; user-select: none; -webkit-user-select: none; }
     #pad button:active { background: rgba(60,110,190,.8); }
     #pad button:focus-visible { outline: 2px solid #9cf; }
+    #toDome { position: fixed; left: max(16px, env(safe-area-inset-left, 0px)); bottom: calc(84px + env(safe-area-inset-bottom, 0px));
+              display: inline-flex; align-items: center; height: 44px; padding: 0 14px; border-radius: 14px;
+              border: 1px solid #8a6a2c; background: rgba(60, 40, 8, .7); color: #f2c46d;
+              font: 600 15px system-ui, sans-serif; text-decoration: none; }
+    #toDome:active { background: rgba(120, 85, 20, .8); }
+    #toDome:focus-visible { outline: 2px solid #9cf; }
   </style>
   <script type="importmap">
     { "imports": {
@@ -31,8 +37,9 @@
     <small id="epoch"></small><br>
     <small>ドラッグ: 視点 / W・S・右下ボタン: 前進・後退 / ホイール・×10・÷10: 速度<br>
     VR: トリガー(ピンチ)で指した方向へ前進 / スティック上下: 速度</small>
-<span id="credit">Star data: <a href="https://github.com/astronexus/HYG-Database">HYG Database</a> (CC BY-SA 4.0) / Earth &amp; Moon textures: three.js examples ・ <a href="./index.html">← プラネタリウムへ</a></span>
+<span id="credit">Star data: <a href="https://github.com/astronexus/HYG-Database">HYG Database</a> (CC BY-SA 4.0) / Earth &amp; Moon textures: three.js examples</span>
   </div>
+  <a id="toDome" href="./index.html">← プラネタリウム</a>
   <div id="pad">
     <button data-speed="0.1" aria-label="減速">÷10</button>
     <button data-speed="10" aria-label="加速">×10</button>
