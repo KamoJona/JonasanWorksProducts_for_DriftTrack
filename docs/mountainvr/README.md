@@ -1,0 +1,37 @@
+# mountainVR (Ridgeline AR)
+
+現在地から見える範囲で**一番高い山**を標高データから求め、その**稜線**をスマホのカメラ映像に重ねて表示する Web アプリ（ビルド不要・静的ファイルのみ）。
+
+## 使い方
+
+1. HTTPS で配信する（カメラ・方位センサーは HTTPS 必須）。例:
+   - GitHub Pages / Netlify / Cloudflare Pages などに 公開ページ: https://kamojona.github.io/JonasanWorksProducts_for_DriftTrack/mountainvr/
+   - ローカル確認: `python3 -m http.server` → PC で `http://localhost:8000/?sim=1&lat=35.5005&lon=138.76`
+2. スマホで開き「AR を開始」→ カメラ・位置情報・モーションセンサーを許可
+3. 稜線が実際の山とずれていたら
+   - 画面中央の十字を実際の山頂に向けて **「山頂に合わせる」**、または
+   - 画面を**ドラッグ**して重ねる（ピンチでカメラ画角を調整）
+
+### URL パラメータ
+
+| パラメータ | 説明 |
+|---|---|
+| `lat`, `lon` | 観測地点を固定（省略時は GPS） |
+| `radius` | 探索半径 m（20000 / 40000 / 80000 / 150000） |
+| `sim=1` | PC 向けシミュレーション（ドラッグで見回す、ホイールでズーム）を即開始 |
+
+## 仕組み
+
+1. **標高データ**: [AWS Terrain Tiles](https://registry.opendata.aws/terrain-tiles/)（Terrarium PNG、CORS 対応・キー不要）を半径に応じたズーム (z9–12) で取得
+2. **スカイライン計算** (`js/horizon.js`): 0.25° 刻みで 1440 本のレイを飛ばし、各方位で仰角が最大になる地点を求める。地球の丸み・大気差 (k=0.13) を補正
+3. **一番高い山の抽出**: スカイライン上で標高が最大の点を山頂とし、左右へ「距離が連続している」「標高が一定以上」の範囲を稜線とする（観測者より高い“見える最高点”は必ずスカイライン上にある）
+4. **山名**: OpenStreetMap (Overpass API) で山頂付近の `natural=peak` を検索（失敗時は「最高峰」と表示）
+5. **AR 表示** (`js/orientation.js`): `deviceorientationabsolute`（Android）/ `webkitCompassHeading`（iOS）から端末姿勢を求め、方位・仰角をカメラ画面へ透視投影して Canvas に描画
+
+WebXR の `immersive-ar` は iOS Safari 非対応で、ワールド座標が北に揃わないため、カメラ映像 + 方位センサー方式にしています（iOS / Android 両対応）。
+
+## 既知の制限
+
+- コンパス精度は端末依存で数度ずれる → 手動補正前提
+- 標高は 30〜150 m メッシュ相当のため、山頂標高は実際より低めに出る（山名が取れれば OSM の標高を表示）
+- 建物・樹木は考慮しない（市街地では手前の建物に隠れる山も表示される）
