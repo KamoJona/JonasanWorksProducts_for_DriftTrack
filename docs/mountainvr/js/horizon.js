@@ -13,6 +13,7 @@ const EARTH_R = 6371000;
  */
 export function computeHorizon(dem, lat, lon, {
   radius = 40000, azStep = 0.25, eyeHeight = 1.7, refraction = 0.13, minDist = 80,
+  bandCount = 48, bandNear = 400,
 } = {}) {
   const z = dem.z;
   const mpp = metersPerPixel(lat, z);
@@ -26,6 +27,16 @@ export function computeHorizon(dem, lat, lon, {
   const maxH = dem.maxElev;
   const minStep = mpp * 0.5;
 
+  // 距離帯ごとのシルエット (VR 表示用): bands[k*n+i] = 帯 k・方位 i の最大 tan(仰角)
+  // 帯 0 は bandNear まで、それ以降は対数間隔で radius まで
+  const B = bandCount;
+  const bands = new Float32Array(B * n).fill(-Infinity);
+  const logSpan = Math.log(radius / bandNear);
+  const bandOf = (d) => d <= bandNear ? 0
+    : Math.min(B - 1, 1 + Math.floor((Math.log(d / bandNear) / logSpan) * (B - 1)));
+  const bandDist = Float32Array.from({ length: B }, (_, k) =>
+    k === 0 ? bandNear / 2 : bandNear * Math.exp(((k - 0.5) / (B - 1)) * logSpan));
+
   for (let i = 0; i < n; i++) {
     const az = i * azStep * D2R;
     const sx = Math.sin(az) / mpp, sy = -Math.cos(az) / mpp; // 画像の y は南向き
@@ -37,6 +48,9 @@ export function computeHorizon(dem, lat, lon, {
       const h = dem.sample(ox + sx * d, oy + sy * d);
       const t = (h - h0) / d - d * curv;
       if (t > maxT) { maxT = t; bd = d; bh = h; }
+      // 手前の地形に完全に隠れていない点だけ帯に記録 (隠れた点は手前の帯が上書きする)
+      const bi = bandOf(d) * n + i;
+      if (t > bands[bi]) bands[bi] = t;
       d += Math.max(minStep, d * 0.0015);
     }
     angle[i] = Math.atan(maxT);
@@ -45,7 +59,46 @@ export function computeHorizon(dem, lat, lon, {
     pxA[i] = ox + sx * bd;
     pyA[i] = oy + sy * bd;
   }
-  return { n, azStep, h0, ground, angle, dist, elev, px: pxA, py: pyA, z, lat, lon, mpp };
+  return {
+    n, azStep, h0, ground, angle, dist, elev, px: pxA, py: pyA, z, lat, lon, mpp,
+    ox, oy, curv, radius, bands, bandCount: B, bandDist,
+  };
+}
+
+/**
+ * OSM の山頂リストのうち、観測点から実際に見える (手前の地形に隠れない) ものを返す
+ */
+export function visiblePeaks(dem, hz, peaks) {
+  const { ox, oy, h0, curv, mpp, radius } = hz;
+  const [lx, ly] = [ox, oy];
+  const out = [];
+  for (const p of peaks) {
+    const [px, py] = lonLatToPixel(p.lon, p.lat, hz.z);
+    const dx = (px - lx) * mpp, dy = (py - ly) * mpp;
+    const d = Math.hypot(dx, dy);
+    if (d < 300 || d > radius) continue;
+    // OSM の山頂位置のずれ・DEM の平滑化を考慮して周囲 (約 ±2px) の最大値を使う
+    let hp = 0, hx = px, hy = py;
+    for (let a = -2; a <= 2; a++) for (let b = -2; b <= 2; b++) {
+      const v = dem.sample(px + a, py + b);
+      if (v > hp) { hp = v; hx = px + a; hy = py + b; }
+    }
+    const tp = (hp - h0) / d - d * curv;
+    const ux = dx / d / mpp, uy = dy / d / mpp;
+    let maxT = -Infinity, s = 80;
+    // 山頂直前の自分の斜面で隠れたと誤判定しないよう、手前で打ち切る
+    const end = d - Math.max(4 * mpp, d * 0.04);
+    while (s < end) {
+      const h = dem.sample(lx + ux * s, ly + uy * s);
+      const t = (h - h0) / s - s * curv;
+      if (t > maxT) { maxT = t; if (t > tp + 0.002) break; }
+      s += Math.max(mpp * 0.5, s * 0.0015);
+    }
+    if (tp < maxT - 0.003) continue; // 隠れている
+    const az = ((Math.atan2(dx, -dy) / D2R) + 360) % 360;
+    out.push({ ...p, distance: d, azimuth: az, angle: Math.atan(tp) / D2R, demElev: hp });
+  }
+  return out;
 }
 
 /**
@@ -124,4 +177,33 @@ export async function lookupPeakName(lat, lon, radius = 2000) {
   } catch {
     return null;
   }
+}
+
+// 半径内の名前付き山頂を OSM から一括取得 (失敗時は null)
+export async function fetchPeaks(lat, lon, radius) {
+  const dLat = radius / 111320, dLon = radius / (111320 * Math.cos(lat * D2R));
+  const bbox = [lat - dLat, lon - dLon, lat + dLat, lon + dLon].map((v) => v.toFixed(4)).join(',');
+  const q = `[out:json][timeout:25];node["natural"~"^(peak|volcano)$"]["name"](${bbox});out body;`;
+  const urls = ['https://overpass-api.de/api/interpreter', 'https://overpass.kumi.systems/api/interpreter'];
+  for (const url of urls) {
+    try {
+      const ctl = new AbortController();
+      const timer = setTimeout(() => ctl.abort(), 30000);
+      const res = await fetch(url, {
+        method: 'POST', body: 'data=' + encodeURIComponent(q), signal: ctl.signal,
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      });
+      clearTimeout(timer);
+      if (!res.ok) continue;
+      const js = await res.json();
+      return (js.elements || []).map((el) => ({
+        lat: el.lat, lon: el.lon,
+        name: el.tags['name:ja'] || el.tags.name,
+        ele: parseFloat(String(el.tags.ele || '').replace(/[^0-9.]/g, '')) || null,
+      }));
+    } catch (e) {
+      console.warn('overpass', url, e);
+    }
+  }
+  return null;
 }

@@ -1,5 +1,5 @@
 import { DEM, zoomForRadius } from './terrain.js';
-import { computeHorizon, findHighestRidge, lookupPeakName } from './horizon.js';
+import { computeHorizon, findHighestRidge, fetchPeaks, visiblePeaks } from './horizon.js';
 import { OrientationSensor, matFromYawPitch, cameraDirection } from './orientation.js';
 
 const D2R = Math.PI / 180;
@@ -8,7 +8,10 @@ const video = $('camera'), canvas = $('overlay'), ctx = canvas.getContext('2d');
 const params = new URLSearchParams(location.search);
 
 const S = {
-  mode: null,            // 'ar' | 'sim'
+  mode: null,            // 'ar' (カメラ) | 'vr' (景色を再現) | 'sim' (PC・ドラッグ)
+  showLand: false,       // 地形シルエットを描くか (VR / sim)
+  peaks: [],             // 見える山頂 (OSM)
+  dem: null,
   sensor: new OrientationSensor(),
   useSensor: false,
   lat: null, lon: null,
@@ -65,18 +68,27 @@ async function start(mode) {
   $('start').hidden = true;
   $('hud').hidden = false;
   document.body.classList.add('running', 'mode-' + mode);
+  S.showLand = mode !== 'ar';
+  document.body.classList.toggle('land', S.showLand);
+  setHint();
   try {
-    if (mode === 'ar') {
+    if (mode === 'ar' || mode === 'vr') {
       // iOS では許可ダイアログをユーザー操作の直後に出す必要がある
       await OrientationSensor.requestPermission().catch((e) => setStatus(e.message, true));
       S.sensor.start();
       S.useSensor = true;
-      startCamera();
+      setHint();
+      if (mode === 'ar') startCamera();
       setTimeout(() => {
         if (!S.sensor.q) {
           S.useSensor = false;
           document.body.classList.add('no-sensor');
+          S.showLand = true;
+          document.body.classList.add('land');
+          if (S.ridge) { S.simYaw = S.ridge.azimuth; S.simPitch = S.ridge.angle / D2R; }
+          setHint();
           setStatus('方位センサーが使えないため、ドラッグで見回すモードにしました');
+          setTimeout(() => setStatus(''), 4000);
         }
       }, 3000);
     }
@@ -94,6 +106,9 @@ async function compute() {
   S.lat = pos.lat; S.lon = pos.lon;
   const z = zoomForRadius(S.radius);
   const dem = new DEM(z);
+  S.dem = dem;
+  S.peaks = [];
+  const peaksPromise = fetchPeaks(S.lat, S.lon, S.radius); // 標高データと並行して取得
   setStatus('標高データを読み込み中…');
   await dem.loadArea(S.lat, S.lon, S.radius, (d, t) => setStatus(`標高データを読み込み中… ${d}/${t}`));
   setStatus('稜線を計算中…');
@@ -110,8 +125,32 @@ async function compute() {
     S.simPitch = S.ridge.angle / D2R;
   }
   updateInfo();
-  setStatus('');
-  lookupPeakName(S.ridge.lat, S.ridge.lon).then((p) => { S.peakName = p; updateInfo(); });
+  setStatus('山名を取得中…');
+  const all = await peaksPromise;
+  if (all) {
+    S.peaks = visiblePeaks(dem, S.hz, all);
+    // 最高峰の山名: 稜線の最高点に最も近い山頂
+    let best = null, bestD = 2500;
+    for (const p of all) {
+      const d = Math.hypot((p.lat - S.ridge.lat) * 111320, (p.lon - S.ridge.lon) * 111320 * Math.cos(S.lat * D2R));
+      if (d < bestD) { bestD = d; best = p; }
+    }
+    S.peakName = best;
+    S.ridge.osm = best;
+    console.log(`peaks: ${all.length} 件中 ${S.peaks.length} 件が見える`);
+    setStatus('');
+  } else {
+    setStatus('山名を取得できませんでした (標高のみ表示)');
+    setTimeout(() => setStatus(''), 4000);
+  }
+  updateInfo();
+}
+
+function setHint() {
+  $('hint').textContent = S.useSensor
+    ? 'ドラッグ: 位置合わせ / ピンチ: 画角'
+    : 'ドラッグ: 見回す / ホイール・ピンチ: ズーム';
+  $('btn-mode').textContent = S.showLand ? 'カメラ表示' : '景色を再現';
 }
 
 // ---------- 表示 ----------
@@ -198,21 +237,11 @@ function frame() {
     pts.push(project(i * azStep, A[i]));
   }
 
-  // シミュレーション時は地面を塗る
-  if (!S.useSensor || !document.body.classList.contains('has-camera')) {
-    ctx.fillStyle = 'rgba(20, 28, 38, 0.92)';
-    ctx.beginPath();
-    let open = false;
-    for (const p of pts) {
-      if (!p) continue;
-      if (!open) { ctx.moveTo(p[0], H + 10); ctx.lineTo(p[0], p[1]); open = true; }
-      else ctx.lineTo(p[0], p[1]);
-    }
-    if (open) { ctx.lineTo(pts.filter(Boolean).at(-1)[0], H + 10); ctx.closePath(); ctx.fill(); }
-  }
-
+  if (S.showLand) drawLandscape(project, c0, span, W, H);
+  else {
   // 全周スカイライン (細線)
   strokePolyline(pts, W, 'rgba(255,255,255,0.55)', 1.5);
+  }
 
   // 最高峰の稜線 (太線)
   const r = S.ridge;
@@ -220,14 +249,17 @@ function frame() {
     const rp = r.indices.map((i) => project(i * azStep, A[i]));
     ctx.save();
     ctx.shadowColor = 'rgba(255, 170, 0, 0.9)';
-    ctx.shadowBlur = 14;
-    strokePolyline(rp, W, '#ffb020', 5);
+    ctx.shadowBlur = S.showLand ? 6 : 14;
+    strokePolyline(rp, W, S.showLand ? 'rgba(255,176,32,0.85)' : '#ffb020', S.showLand ? 2.5 : 5);
     ctx.restore();
-    strokePolyline(rp, W, '#fff3c4', 1.5);
+    if (!S.showLand) strokePolyline(rp, W, '#fff3c4', 1.5);
 
     const p = project(r.azimuth, A[r.peakIndex]);
-    if (p && p[0] > -20 && p[0] < W + 20 && p[1] > -20 && p[1] < H + 20) drawPeakLabel(p, W);
-    else drawOffscreenArrow(W, H);
+    const onScreen = p && p[0] > -20 && p[0] < W + 20 && p[1] > -20 && p[1] < H + 20;
+    const placed = [];
+    if (onScreen) placed.push(drawPeakLabel(p, W));
+    drawPeakLabels(project, W, H, placed);
+    if (!onScreen) drawOffscreenArrow(W, H);
   }
   drawCrosshair(cx, cy);
   drawPanorama(W, H, halfSpan);
@@ -276,6 +308,113 @@ function drawPeakLabel([x, y], W) {
   ctx.font = '600 16px system-ui, sans-serif'; ctx.fillText(title, bx + 10, by + 20);
   ctx.fillStyle = '#ffd88a';
   ctx.font = '13px system-ui, sans-serif'; ctx.fillText(sub, bx + 10, by + 38);
+  return { x: bx - 4, y: by - 4, w: bw + 8, h: bh + 48 };
+}
+
+// ---------- VR: 距離帯ごとの山のシルエット ----------
+const NEAR_RGB = [10, 12, 16];      // 近い山: ほぼ黒
+const HAZE_RGB = [190, 202, 214];   // 遠い山: 空に溶ける霞んだグレー
+const SKY_TOP = '#5f8fbf', SKY_HORIZON = '#d3dde6';
+
+function bandColor(d, lift = 0) {
+  const vis = Math.max(20000, S.radius * 0.6); // 霞の効き具合 (m): この距離で約 63% 空の色に近づく
+  const f = Math.min(0.82, 1 - Math.exp(-Math.max(0, d - 1500) / vis));
+  return `rgb(${NEAR_RGB.map((c, k) => Math.round(c + (HAZE_RGB[k] - c) * f + lift)).join(',')})`;
+}
+
+function drawLandscape(project, c0, span, W, H) {
+  const { n, azStep, bands, bandCount: B, bandDist } = S.hz;
+  // 画面上の「下」方向 (端末の傾きを考慮)
+  const h = S.cam.heading;
+  const pa = project(h, -3), pb = project(h, -13);
+  let dx = 0, dy = 1;
+  if (pa && pb) { const l = Math.hypot(pb[0] - pa[0], pb[1] - pa[1]) || 1; dx = (pb[0] - pa[0]) / l; dy = (pb[1] - pa[1]) / l; }
+  const L = (W + H) * 2;
+
+  // 空: 地平線 (仰角 0°) を基準にしたグラデーション
+  const s0 = project(h, 0), s1 = project(h, 35);
+  if (s0 && s1) {
+    const g = ctx.createLinearGradient(s0[0], s0[1], s1[0], s1[1]);
+    g.addColorStop(0, SKY_HORIZON); g.addColorStop(1, SKY_TOP);
+    ctx.fillStyle = g;
+  } else ctx.fillStyle = SKY_TOP;
+  ctx.fillRect(0, 0, W, H);
+
+  for (let k = B - 1; k >= 0; k--) {
+    const fill = new Path2D(), edge = new Path2D();
+    let seg = [], miss = 0;
+    const flush = () => {
+      if (seg.length > 1) {
+        const [f0, f1] = [seg[0], seg[seg.length - 1]];
+        fill.moveTo(f0[0] + dx * L, f0[1] + dy * L);
+        for (const q of seg) fill.lineTo(q[0], q[1]);
+        fill.lineTo(f1[0] + dx * L, f1[1] + dy * L);
+        fill.closePath();
+        edge.moveTo(f0[0], f0[1]);
+        for (const q of seg) edge.lineTo(q[0], q[1]);
+      }
+      seg = [];
+    };
+    const row = k * n;
+    for (let j = -span; j <= span; j++) {
+      const i = (((c0 + j) % n) + n) % n;
+      const t = bands[row + i];
+      const q = t === -Infinity ? null : project(i * azStep, Math.atan(t) / D2R);
+      if (!q) { if (++miss > 2) flush(); continue; } // 1〜2 本の欠けは無視
+      if (seg.length && Math.abs(q[0] - seg[seg.length - 1][0]) > W * 0.5) flush();
+      miss = 0;
+      seg.push(q);
+    }
+    flush();
+    const d = bandDist[k];
+    ctx.fillStyle = bandColor(d);
+    ctx.fill(fill);
+    ctx.strokeStyle = bandColor(d, 16); // 稜線をわずかに明るく縁取る
+    ctx.lineWidth = 1;
+    ctx.stroke(edge);
+  }
+}
+
+// 見える山頂に山名と標高を表示 (重なるラベルは間引く)
+function drawPeakLabels(project, W, H, placed) {
+  if (!S.peaks.length) return;
+  const hi = S.ridge?.osm;
+  const list = S.peaks
+    .filter((p) => !(hi && p.lat === hi.lat && p.lon === hi.lon))
+    .map((p) => ({ p, s: project(p.azimuth, p.angle) }))
+    .filter(({ s }) => s && s[0] > 0 && s[0] < W && s[1] > 0 && s[1] < H)
+    .sort((a, b) => (b.p.ele || b.p.demElev) - (a.p.ele || a.p.demElev));
+  const hit = (r) => placed.some((o) => r.x < o.x + o.w && r.x + r.w > o.x && r.y < o.y + o.h && r.y + r.h > o.y);
+  let count = 0;
+  for (const { p, s } of list) {
+    if (count >= 30) break;
+    const ele = `${Math.round(p.ele || p.demElev)} m`;
+    ctx.font = '600 13px system-ui, sans-serif';
+    const w = Math.max(ctx.measureText(p.name).width, ctx.measureText(ele).width) + 6;
+    let rect = null;
+    for (const lead of [18, 44, 70]) {
+      const r = { x: s[0] - w / 2, y: s[1] - lead - 32, w, h: 32 + lead };
+      if (r.y > 0 && !hit(r)) { rect = r; break; }
+    }
+    if (!rect) continue;
+    placed.push(rect);
+    count++;
+    const near = p.distance < Math.max(20000, S.radius * 0.6) * 0.5;
+    ctx.strokeStyle = 'rgba(255,255,255,0.75)'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(s[0], s[1] - 2); ctx.lineTo(s[0], rect.y + 32); ctx.stroke();
+    ctx.fillStyle = '#fff';
+    ctx.beginPath(); ctx.arc(s[0], s[1], 2.5, 0, Math.PI * 2); ctx.fill();
+    ctx.textAlign = 'center';
+    ctx.shadowColor = 'rgba(0,0,0,0.85)'; ctx.shadowBlur = 4;
+    ctx.fillStyle = '#fff';
+    ctx.font = '600 13px system-ui, sans-serif';
+    ctx.fillText(p.name, s[0], rect.y + 13);
+    ctx.fillStyle = near ? '#ffe2a8' : '#f4f6f8';
+    ctx.font = '12px system-ui, sans-serif';
+    ctx.fillText(ele, s[0], rect.y + 27);
+    ctx.shadowBlur = 0;
+    ctx.textAlign = 'start';
+  }
 }
 
 function drawOffscreenArrow(W, H) {
@@ -405,6 +544,14 @@ canvas.addEventListener('wheel', (e) => {
 
 $('btn-ar').addEventListener('click', () => start('ar'));
 $('btn-sim').addEventListener('click', () => start('sim'));
+$('btn-vr').addEventListener('click', () => start('vr'));
+$('btn-mode').addEventListener('click', () => {
+  // カメラ映像 ⇔ 景色の再現 を切り替え
+  S.showLand = !S.showLand;
+  if (!S.showLand && !video.srcObject) startCamera();
+  document.body.classList.toggle('land', S.showLand);
+  setHint();
+});
 $('btn-align').addEventListener('click', () => {
   // 画面中央の十字を実際の山頂に向けた状態で押す → 方位・仰角のずれを補正
   if (!S.ridge || !S.useSensor) return;
@@ -429,5 +576,4 @@ if (params.get('radius')) $('in-radius').value = params.get('radius');
 if (params.get('lat')) $('in-lat').value = params.get('lat');
 if (params.get('lon')) $('in-lon').value = params.get('lon');
 if (!window.isSecureContext) $('secure-warn').hidden = false;
-$('btn-sim').addEventListener('click', () => { $('hint').textContent = 'ドラッグ: 見回す / ホイール: ズーム'; });
-if (params.get('sim') === '1') { $('hint').textContent = 'ドラッグ: 見回す / ホイール: ズーム'; start('sim'); }
+if (params.get('sim') === '1') start('sim');

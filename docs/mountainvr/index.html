@@ -51,7 +51,9 @@
   #controls { position: absolute; right: 12px; bottom: calc(var(--sab) + 86px); display: flex; flex-direction: column; gap: 8px; pointer-events: auto; }
   #controls button { background: var(--panel); color: var(--fg); border: 1px solid var(--line); padding: 10px 12px; font-size: 13px; backdrop-filter: blur(6px); }
   #controls #btn-align { background: var(--accent); color: var(--accent-fg); border-color: transparent; }
-  body.mode-sim #btn-align, body.mode-sim #btn-reset, body.no-sensor #btn-align, body.no-sensor #btn-reset { display: none; }
+  body.land #btn-align, body.mode-sim #btn-reset, body.no-sensor #btn-align, body.no-sensor #btn-reset,
+  body.mode-sim #btn-mode, body.no-sensor #btn-mode { display: none; }
+  body.land #camera { display: none !important; }
   #settings { position: absolute; left: 12px; right: 84px; bottom: calc(var(--sab) + 86px); pointer-events: auto; font-size: 13px; }
   #settings input[type=range] { padding: 0; accent-color: var(--accent); }
   #status { position: fixed; left: 50%; top: 45%; transform: translate(-50%, -50%); max-width: calc(100% - 32px);
@@ -73,7 +75,7 @@
         fill="none" stroke="rgba(255,255,255,.35)" stroke-width="1.5"/>
       <path d="M140 40 L175 22 L200 8 L222 20 L250 16 L280 32" fill="none" stroke="#ffb020" stroke-width="4" stroke-linejoin="round"/>
     </svg>
-    <p class="lead">現在地から見える範囲で一番高い山を標高データから探し、その稜線をカメラ映像に重ねて表示します。</p>
+    <p class="lead">現在地から見える範囲で一番高い山を標高データから探し、その稜線を表示します。VR では建物がなければ見えるはずの山並みを再現し、山頂に山名と標高を表示します（近い山は黒く、遠い山は霞んだグレー）。</p>
     <div class="row">
       <div><label for="in-radius">探索半径</label>
         <select id="in-radius">
@@ -88,9 +90,10 @@
       <div><label for="in-lat">緯度 (空欄で GPS)</label><input id="in-lat" inputmode="decimal" placeholder="35.5000"></div>
       <div><label for="in-lon">経度</label><input id="in-lon" inputmode="decimal" placeholder="138.7600"></div>
     </div>
-    <button class="primary" id="btn-ar">AR を開始</button>
+    <button class="primary" id="btn-vr">VR を開始（景色を再現）</button>
+    <button class="secondary" id="btn-ar">AR を開始（カメラ映像に重ねる）</button>
     <button class="secondary" id="btn-sim">PC でシミュレーション (ドラッグで見回す)</button>
-    <p class="note">カメラ・位置情報・方位センサーへのアクセスを許可してください。コンパスは数度ずれることがあるので、表示後にドラッグするか「山頂に合わせる」で補正できます。</p>
+    <p class="note">位置情報・方位センサー（AR ではカメラも）へのアクセスを許可してください。山名は OpenStreetMap から取得します。コンパスは数度ずれることがあるので、表示後にドラッグするか「山頂に合わせる」で補正できます。</p>
     <p class="note warn" id="secure-warn" hidden>HTTPS で開いていないため、カメラとセンサーが使えません。</p>
   </div>
 </section>
@@ -116,6 +119,7 @@
   <div id="controls">
     <button id="btn-align">山頂に合わせる</button>
     <button id="btn-reset">補正リセット</button>
+    <button id="btn-mode">カメラ表示</button>
     <button id="btn-recalc">再計算</button>
     <button id="btn-settings">設定</button>
   </div>
