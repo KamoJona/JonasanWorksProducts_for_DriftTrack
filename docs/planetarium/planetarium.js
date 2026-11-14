@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { VRButton } from 'three/addons/webxr/VRButton.js';
 import { ephemeris, horizonMatrix, raDecToScene, eclipticXYZToScene, PLANETS, AU, R_EARTH, R_MOON, R_SUN, DEG } from './astro.js';
+import { SHOWERS, SPORADIC_ZHR, activeShowers, nextShower } from './meteors.js';
 
 // =====================================================================
 // プラネタリウム
@@ -15,11 +16,23 @@ const R_GROUND = 400, R_MOON_SHELL = 500, R_SUN_SHELL = 600, R_LABEL = 900, R_ST
 // ---------- 状態 ----------
 const state = {
   simMs: Date.now(),
+  meteors: true,
   rate: 1,               // 実時間の何倍で進めるか
   sunOn: true,
   labels: true,
   lat: 35.6812, lon: 139.7671, placeName: '東京',
 };
+
+// URL で日時・場所を指定できる (例: ?t=2026-08-13T02:00:00%2B09:00&lat=35.68&lon=139.77)
+{
+  const q = new URLSearchParams(location.search);
+  const t = Date.parse(q.get('t') ?? '');
+  if (Number.isFinite(t)) state.simMs = t;
+  const lat = Number(q.get('lat')), lon = Number(q.get('lon'));
+  if (q.has('lat') && q.has('lon') && Number.isFinite(lat) && Number.isFinite(lon)) {
+    Object.assign(state, { lat, lon, placeName: '指定地点' });
+  }
+}
 
 // ---------- 基本セットアップ ----------
 const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -330,6 +343,12 @@ function twilightName(a) {
 
 // ---------- 操作: 見回す・ズーム ----------
 let yaw = Math.PI, pitch = 20 * DEG;   // 南の空を見上げた状態から
+{
+  // URL で視線を指定できる (?az=45&alt=40 … 方位は北 0°・東 90°、高度は度)
+  const q = new URLSearchParams(location.search);
+  if (q.has('az') && Number.isFinite(Number(q.get('az')))) yaw = -Number(q.get('az')) * DEG;
+  if (q.has('alt') && Number.isFinite(Number(q.get('alt')))) pitch = THREE.MathUtils.clamp(Number(q.get('alt')), -17, 90) * DEG;
+}
 const pointers = new Map();
 let pinchStart = null;
 const canvas = renderer.domElement;
@@ -467,6 +486,12 @@ sunBtn.addEventListener('click', () => {
   sunBtn.setAttribute('aria-pressed', String(state.sunOn));
   sunBtn.textContent = state.sunOn ? '太陽 ON' : '太陽 OFF';
 });
+const meteorBtn = document.getElementById('meteorToggle');
+meteorBtn.addEventListener('click', () => {
+  state.meteors = !state.meteors;
+  meteorBtn.setAttribute('aria-pressed', String(state.meteors));
+  if (!state.meteors) meteors.length = 0;
+});
 const labelBtn = document.getElementById('labelToggle');
 labelBtn.addEventListener('click', () => {
   state.labels = !state.labels;
@@ -523,6 +548,7 @@ const clockEl = document.getElementById('clock');
 const rateEl = document.getElementById('rateText');
 const placeEl = document.getElementById('place');
 const sunInfoEl = document.getElementById('sunInfo');
+const meteorInfoEl = document.getElementById('meteorInfo');
 let lastHud = '';
 function updateHud() {
   const d = new Date(state.simMs);
@@ -532,19 +558,176 @@ function updateHud() {
   const ns = state.lat >= 0 ? `北緯${state.lat.toFixed(2)}°` : `南緯${(-state.lat).toFixed(2)}°`;
   const ew = state.lon >= 0 ? `東経${state.lon.toFixed(2)}°` : `西経${(-state.lon).toFixed(2)}°`;
   const info = `太陽高度 ${lastInfo.sunAlt.toFixed(1)}°（${twilightName(lastInfo.sunAlt)}）・ 月齢 ${lastInfo.moonAge.toFixed(1)}（輝面 ${Math.round(lastInfo.moonIllum * 100)}%）`;
-  const key = clock + rate + info + state.placeName + ns + ew;
+  const mText = meteorText();
+  const key = clock + rate + info + state.placeName + ns + ew + mText;
   if (key === lastHud) return;
   lastHud = key;
   clockEl.textContent = clock;
   rateEl.textContent = rate;
   placeEl.textContent = `${state.placeName}（${ns} ${ew}）`;
   sunInfoEl.textContent = info;
+  meteorInfoEl.textContent = mText;
   const g = hudCanvas.getContext('2d');
   g.clearRect(0, 0, 640, 120);
   g.fillStyle = 'rgba(0,10,30,0.55)'; g.fillRect(0, 0, 640, 120);
   g.fillStyle = '#fff'; g.font = 'bold 40px sans-serif'; g.fillText(clock, 18, 50);
   g.fillStyle = '#f2c46d'; g.font = '30px sans-serif'; g.fillText(`${rate} ・ ${state.placeName}`, 18, 100);
   hudTex.needsUpdate = true;
+}
+
+// ---------- 流星 ----------
+// 放射点から大円に沿って外向きに流す。1 本の流星は太さのある帯 (先端が明るく尾が消える) で描く。
+// 実際の頻度 (ペルセウス座流星群の極大でも 1 分に 1 個程度) では見ごたえがないので、
+// 演出として METEOR_BOOST 倍で流す (倍率は画面に表示する)。
+const METEOR_BOOST = 60;
+const R_METEOR = 800, MAX_METEORS = 64, SEG = 20;
+const meteorGeo = new THREE.BufferGeometry();
+const mPos = new Float32Array(MAX_METEORS * (SEG + 1) * 2 * 3);
+const mCol = new Float32Array(MAX_METEORS * (SEG + 1) * 2 * 3);
+meteorGeo.setAttribute('position', new THREE.BufferAttribute(mPos, 3).setUsage(THREE.DynamicDrawUsage));
+meteorGeo.setAttribute('color', new THREE.BufferAttribute(mCol, 3).setUsage(THREE.DynamicDrawUsage));
+{
+  const idx = [];
+  for (let m = 0; m < MAX_METEORS; m++) for (let i = 0; i < SEG; i++) {
+    const a = (m * (SEG + 1) + i) * 2;
+    idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2);
+  }
+  meteorGeo.setIndex(idx);
+}
+const meteorMesh = new THREE.Mesh(meteorGeo, new THREE.MeshBasicMaterial({
+  vertexColors: true, blending: THREE.AdditiveBlending, transparent: true, depthWrite: false, side: THREE.DoubleSide }));
+meteorMesh.frustumCulled = false;
+meteorMesh.renderOrder = 3;
+scene.add(meteorMesh);
+
+const meteors = [];
+const rnd = Math.random;
+const vA = new THREE.Vector3(), vB = new THREE.Vector3(), vD = new THREE.Vector3(), vT = new THREE.Vector3(), vS = new THREE.Vector3();
+
+// radiant: 放射点 (地平座標の単位ベクトル)、v: 対地速度 km/s
+function spawnMeteor(radiant, v) {
+  if (meteors.length >= MAX_METEORS) return;
+  const u = new THREE.Vector3(1, 0, 0);
+  if (Math.abs(radiant.x) > 0.9) u.set(0, 1, 0);
+  u.sub(radiant.clone().multiplyScalar(u.dot(radiant))).normalize();
+  const w = new THREE.Vector3().crossVectors(radiant, u);
+  // 見ている方向で流れやすくする (演出)。8 割は視野の中に出るまで候補を選び直す
+  const view = camera.getWorldDirection(new THREE.Vector3());
+  const wantInView = rnd() < 0.8;
+  const viewCos = Math.cos(Math.min(camera.fov * 0.6, 50) * DEG);
+  for (let tries = 0; tries < 40; tries++) {
+    // 放射点からの角距離 d。放射点の近くは短く、離れるほど長い流星になる
+    const d = (8 + 92 * rnd()) * DEG, phi = rnd() * Math.PI * 2;
+    const A = radiant.clone().multiplyScalar(Math.cos(d))
+      .addScaledVector(u, Math.cos(phi) * Math.sin(d)).addScaledVector(w, Math.sin(phi) * Math.sin(d));
+    if (A.y < Math.sin(6 * DEG)) continue;                    // 地平線すれすれ・下は流さない
+    if (wantInView && A.dot(view) < viewCos && tries < 39) continue;
+    const B = A.clone().multiplyScalar(A.dot(radiant)).sub(radiant).normalize();   // 放射点から離れる向き
+    const L = (6 + 24 * Math.sin(d) * Math.sqrt(rnd())) * DEG;                       // 経路の長さ
+    const omega = ((v / 70) * 38 * Math.sin(d) + 6) * DEG;                            // 角速度 rad/s
+    const fireball = rnd() < 0.05;
+    meteors.push({
+      A, B, L, T: THREE.MathUtils.clamp(L / omega, 0.25, 1.8), t: 0,
+      trail: L * (0.5 + 0.3 * rnd()),
+      bright: fireball ? 2.4 : 0.8 + 0.8 * rnd() ** 2,
+      width: fireball ? 2.4 : 1.3,
+      color: v > 55 ? [0.78, 0.92, 1.0] : v < 35 ? [1.0, 0.86, 0.62] : [0.95, 0.95, 0.92],
+    });
+    return;
+  }
+}
+
+function drawMeteors(dt) {
+  const pixel = camera.fov * DEG / innerHeight * R_METEOR;     // 画面 1 px に相当する長さ
+  mPos.fill(0); mCol.fill(0);
+  for (let m = meteors.length - 1; m >= 0; m--) {
+    const me = meteors[m];
+    me.t += dt;
+    if (me.t >= me.T) { meteors.splice(m, 1); continue; }
+  }
+  meteors.forEach((me, m) => {
+    const f = me.t / me.T;
+    const head = me.L * f, tail = Math.max(0, head - me.trail);
+    const env = Math.pow(Math.sin(Math.PI * f), 0.6) * me.bright;
+    for (let i = 0; i <= SEG; i++) {
+      const k = i / SEG, s = tail + (head - tail) * k;
+      vD.copy(me.A).multiplyScalar(Math.cos(s)).addScaledVector(me.B, Math.sin(s));
+      vT.copy(me.A).multiplyScalar(-Math.sin(s)).addScaledVector(me.B, Math.cos(s));
+      vS.crossVectors(vT, vD).normalize().multiplyScalar(pixel * me.width * (0.5 + 1.5 * k * k));
+      const c = env * Math.pow(k, 1.5);
+      const o = ((m * (SEG + 1) + i) * 2) * 3;
+      for (const [j, sign] of [[0, 1], [3, -1]]) {
+        mPos[o + j] = vD.x * R_METEOR + vS.x * sign;
+        mPos[o + j + 1] = vD.y * R_METEOR + vS.y * sign;
+        mPos[o + j + 2] = vD.z * R_METEOR + vS.z * sign;
+        mCol[o + j] = me.color[0] * c; mCol[o + j + 1] = me.color[1] * c; mCol[o + j + 2] = me.color[2] * c;
+      }
+    }
+  });
+  meteorGeo.attributes.position.needsUpdate = true;
+  meteorGeo.attributes.color.needsUpdate = true;
+}
+
+// 放射点の印 (活動中の流星群だけ表示)
+function makeRadiantLabel(name) {
+  const c = Object.assign(document.createElement('canvas'), { width: 512, height: 128 });
+  const g = c.getContext('2d');
+  g.textAlign = 'center';
+  g.shadowColor = '#000'; g.shadowBlur = 6;
+  g.fillStyle = 'rgba(150,255,190,0.95)';
+  g.font = '600 44px system-ui, sans-serif';
+  g.fillText('✦', 256, 46);                       // 放射点の位置 (キャンバスの中央)
+  g.font = '600 30px system-ui, sans-serif';
+  g.fillText(`${name}の放射点`, 256, 100);
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), depthTest: false, transparent: true, sizeAttenuation: false }));
+  sp.center.set(0.5, 0.75);                       // ✦ の中心を放射点に合わせる
+  sp.scale.set(0.48, 0.12, 1);
+  sp.renderOrder = 5;
+  sp.visible = false;
+  sky.add(sp);
+  return sp;
+}
+const radiantLabels = new Map(SHOWERS.map((s) => [s.key, makeRadiantLabel(s.name)]));
+
+let meteorInfo = { list: [], text: '' };
+// 実時間 1 秒あたりに流す数。空の明るさ (限界等級) と放射点の高さで実際の数を見積もり、演出倍率をかける
+function updateMeteorShowers(dt, limitMag) {
+  const date = new Date(state.simMs);
+  const act = activeShowers(date);
+  const lmFactor = Math.pow(2.5, Math.min(0, limitMag - 6.5));   // 空が明るいほど見える数が減る
+  const list = [];
+  for (const [key, l] of radiantLabels) l.visible = false;
+  for (const a of act) {
+    const dirJ2000 = raDecToScene(a.ra / 15, a.dec);
+    const radiant = dirJ2000.clone().applyMatrix4(sky.matrix);
+    const alt = Math.asin(THREE.MathUtils.clamp(radiant.y, -1, 1)) / DEG;
+    const hr = a.zhr * Math.max(0, Math.sin(alt * DEG)) * lmFactor;
+    list.push({ ...a, alt, hr });
+    const l = radiantLabels.get(a.shower.key);
+    l.position.copy(dirJ2000).multiplyScalar(R_LABEL);
+    l.visible = state.labels && alt > -2;
+    if (state.meteors && rnd() < hr / 3600 * METEOR_BOOST * dt) spawnMeteor(radiant, a.shower.v);
+  }
+  // 散在流星: 放射点はばらばら
+  if (state.meteors && rnd() < SPORADIC_ZHR * lmFactor / 3600 * METEOR_BOOST * 0.5 * dt) {
+    spawnMeteor(new THREE.Vector3().randomDirection(), 25 + 45 * rnd());
+  }
+  meteorInfo.list = list;
+}
+
+function meteorText() {
+  const list = meteorInfo.list;
+  if (!list.length) {
+    const n = nextShower(new Date(state.simMs));
+    const d = new Date(n.peakMs);
+    return `流星群: 活動中のものなし（次は${n.shower.name} ${d.getMonth() + 1}/${d.getDate()} 頃が極大）`;
+  }
+  const top = list[0];
+  const pd = new Date(top.peakMs);
+  const others = list.length > 1 ? ` ほか${list.length - 1}群` : '';
+  const where = top.alt > 0 ? `放射点の高さ ${top.alt.toFixed(0)}°・見える数 約${Math.round(top.hr)}個/時` : '放射点は地平線の下';
+  return `${top.shower.name} 活動中（極大 ${pd.getMonth() + 1}/${pd.getDate()}・ZHR ${Math.round(top.zhr)}）${where}${others}` +
+    (state.meteors ? `　※演出: 実際の約${METEOR_BOOST}倍の頻度で、見ている方向に流しています` : '');
 }
 
 // ---------- ループ ----------
@@ -555,6 +738,8 @@ renderer.setAnimationLoop(() => {
   state.simMs += dt * 1000 * state.rate;
 
   updateSky();
+  updateMeteorShowers(dt, limitingMagnitude(lastInfo.sunAlt));
+  drawMeteors(dt);
   pointMaterial.uniforms.uLimitMag.value = limitingMagnitude(lastInfo.sunAlt);
   skyMaterial.uniforms.uSunOn.value = state.sunOn ? 1 : 0;
   sunMesh.visible = sunGlow.visible = state.sunOn;

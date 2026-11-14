@@ -17,6 +17,7 @@
     #clock { font-size: 22px; font-weight: 700; letter-spacing: .02em; }
     #rateText { color: var(--accent); }
     #hud small { color: var(--dim); }
+    #meteorInfo { color: #9ff0be; font-size: 12.5px; max-width: min(92vw, 560px); }
     #sensorMsg { color: var(--accent); font-size: 12px; max-width: min(92vw, 520px); }
     #sensorMsg:empty { display: none; }
     #hud a { color: var(--dim); pointer-events: auto; }
@@ -56,6 +57,7 @@
     <div id="clock"></div>
     <div><span id="rateText"></span> ・ <span id="place"></span></div>
     <div id="sunInfo"></div>
+    <div id="meteorInfo"></div>
     <div id="sensorMsg"></div>
     <small>ドラッグ: 見回す / ホイール・ピンチ: ズーム / センサー: スマホを向けた方向の空<br>
     VR: トリガーで時間の速さを切り替え</small><br>
@@ -75,6 +77,7 @@
     <div class="row">
       <button id="sunToggle" aria-pressed="true">太陽 ON</button>
       <button id="sensorToggle" aria-pressed="false">センサー</button>
+      <button id="meteorToggle" aria-pressed="true">流星</button>
       <button id="labelToggle" aria-pressed="true">名前</button>
       <a id="toFlight" class="navbtn" href="./flight.html">宇宙へ飛び立つ →</a>
       <select id="loc" aria-label="観測地">
