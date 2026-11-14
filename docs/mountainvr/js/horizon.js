@@ -1,31 +1,57 @@
-// 観測点から 360° 方向にレイを飛ばし、見える稜線 (スカイライン) を求める
+// 観測点から 360° 方向にレイを飛ばし、見える稜線 (スカイライン) と山並みを求める
 import { lonLatToPixel, pixelToLonLat, metersPerPixel } from './terrain.js';
 
 const D2R = Math.PI / 180;
 const EARTH_R = 6371000;
 
+// 建物の高さが混じる標高データ (AWS) 用: 近距離で観測点の地面からこの高さ未満の起伏は平地とみなす
+const DSM_FLATTEN_DIST = 10000, DSM_FLATTEN_H = 60;
+
 /**
- * @returns {{
- *  n:number, azStep:number, h0:number, ground:number,
- *  angle:Float32Array, dist:Float32Array, elev:Float32Array,
- *  px:Float32Array, py:Float32Array
- * }}
+ * 複数解像度の DEM をまとめ、観測点からの「方位ベクトル × 距離」で標高を引けるようにする。
+ * layers: [{ dem, maxDist }] (maxDist の昇順)。近い距離ほど細かい DEM を使う。
  */
-export function computeHorizon(dem, lat, lon, {
-  radius = 40000, azStep = 0.25, eyeHeight = 1.7, refraction = 0.13, minDist = 80,
-  bandCount = 48, bandNear = 400,
+export function makeSampler(layers, lat, lon) {
+  const L = layers.map(({ dem, maxDist }) => {
+    const [ox, oy] = lonLatToPixel(lon, lat, dem.z);
+    return { dem, maxDist, ox, oy, mpp: metersPerPixel(lat, dem.z) };
+  });
+  const last = L[L.length - 1];
+  const ground = L[0].dem.sample(L[0].ox, L[0].oy);
+  const dsm = L[0].dem.sources.aws > 0; // 近距離に建物入りのデータを使っているか
+  const maxElev = Math.max(...L.map((l) => l.dem.maxElev));
+  // ex, ey: 東・南方向の単位ベクトル成分 (m あたり)
+  const sample = (ex, ey, d) => {
+    let l = L[0];
+    for (let k = 0; k < L.length && d > L[k].maxDist; k++) l = L[k + 1] || last;
+    let h = l.dem.sample(l.ox + (ex * d) / l.mpp, l.oy + (ey * d) / l.mpp);
+    if (dsm && d < DSM_FLATTEN_DIST && h - ground < DSM_FLATTEN_H) h = Math.min(h, ground);
+    return h;
+  };
+  const stepAt = (d) => {
+    let l = L[0];
+    for (let k = 0; k < L.length && d > L[k].maxDist; k++) l = L[k + 1] || last;
+    return Math.max(l.mpp * 0.5, d * 0.0015);
+  };
+  // 観測点から見た (東, 南) 方向の距離 [m] (最も粗い DEM のピクセル座標系で一貫させる)
+  const offset = (plat, plon) => {
+    const [px, py] = lonLatToPixel(plon, plat, last.dem.z);
+    return [(px - last.ox) * last.mpp, (py - last.oy) * last.mpp];
+  };
+  const toLonLat = (ex, ey, d) =>
+    pixelToLonLat(last.ox + (ex * d) / last.mpp, last.oy + (ey * d) / last.mpp, last.dem.z);
+  return { sample, stepAt, offset, toLonLat, ground, maxElev, dsm, finestMpp: L[0].mpp };
+}
+
+export function computeHorizon(sampler, {
+  radius = 150000, azStep = 0.25, eyeHeight = 1.7, refraction = 0.13, minDist = 80,
+  bandCount = 56, bandNear = 400,
 } = {}) {
-  const z = dem.z;
-  const mpp = metersPerPixel(lat, z);
-  const [ox, oy] = lonLatToPixel(lon, lat, z);
-  const ground = dem.sample(ox, oy);
+  const { sample, stepAt, ground, maxElev: maxH } = sampler;
   const h0 = ground + eyeHeight;
   const curv = (1 - refraction) / (2 * EARTH_R); // 地球の丸み + 大気差
   const n = Math.round(360 / azStep);
   const angle = new Float32Array(n), dist = new Float32Array(n), elev = new Float32Array(n);
-  const pxA = new Float32Array(n), pyA = new Float32Array(n);
-  const maxH = dem.maxElev;
-  const minStep = mpp * 0.5;
 
   // 距離帯ごとのシルエット (VR 表示用): bands[k*n+i] = 帯 k・方位 i の最大 tan(仰角)
   // 帯 0 は bandNear まで、それ以降は対数間隔で radius まで
@@ -39,63 +65,60 @@ export function computeHorizon(dem, lat, lon, {
 
   for (let i = 0; i < n; i++) {
     const az = i * azStep * D2R;
-    const sx = Math.sin(az) / mpp, sy = -Math.cos(az) / mpp; // 画像の y は南向き
+    const ex = Math.sin(az), ey = -Math.cos(az); // 東, 南 (ピクセル y は南向き)
     let maxT = -Infinity, bd = minDist, bh = ground;
     let d = minDist;
     while (d <= radius) {
       // これ以上遠くに今の仰角を超える地形があり得なければ打ち切り
       if ((maxH - h0) / d - d * curv < maxT) break;
-      const h = dem.sample(ox + sx * d, oy + sy * d);
+      const h = sample(ex, ey, d);
       const t = (h - h0) / d - d * curv;
       if (t > maxT) { maxT = t; bd = d; bh = h; }
-      // 手前の地形に完全に隠れていない点だけ帯に記録 (隠れた点は手前の帯が上書きする)
-      const bi = bandOf(d) * n + i;
+      const bi = bandOf(d) * n + i; // 隠れた部分は手前の帯が上から塗るので区別しない
       if (t > bands[bi]) bands[bi] = t;
-      d += Math.max(minStep, d * 0.0015);
+      d += stepAt(d);
     }
     angle[i] = Math.atan(maxT);
     dist[i] = bd;
     elev[i] = bh;
-    pxA[i] = ox + sx * bd;
-    pyA[i] = oy + sy * bd;
   }
   return {
-    n, azStep, h0, ground, angle, dist, elev, px: pxA, py: pyA, z, lat, lon, mpp,
-    ox, oy, curv, radius, bands, bandCount: B, bandDist,
+    n, azStep, h0, ground, angle, dist, elev, curv, radius, sampler,
+    bands, bandCount: B, bandDist, mpp: sampler.finestMpp,
   };
 }
 
 /**
  * OSM の山頂リストのうち、観測点から実際に見える (手前の地形に隠れない) ものを返す
  */
-export function visiblePeaks(dem, hz, peaks) {
-  const { ox, oy, h0, curv, mpp, radius } = hz;
-  const [lx, ly] = [ox, oy];
+export function visiblePeaks(hz, peaks) {
+  const { h0, curv, radius, sampler } = hz;
+  const { sample, stepAt, offset } = sampler;
   const out = [];
   for (const p of peaks) {
-    const [px, py] = lonLatToPixel(p.lon, p.lat, hz.z);
-    const dx = (px - lx) * mpp, dy = (py - ly) * mpp;
+    const [dx, dy] = offset(p.lat, p.lon);
     const d = Math.hypot(dx, dy);
     if (d < 300 || d > radius) continue;
-    // OSM の山頂位置のずれ・DEM の平滑化を考慮して周囲 (約 ±2px) の最大値を使う
-    let hp = 0, hx = px, hy = py;
-    for (let a = -2; a <= 2; a++) for (let b = -2; b <= 2; b++) {
-      const v = dem.sample(px + a, py + b);
-      if (v > hp) { hp = v; hx = px + a; hy = py + b; }
+    const ex = dx / d, ey = dy / d;
+    // OSM の山頂位置のずれ・DEM の平滑化を考慮して前後左右の最大値を使う
+    const r = Math.max(60, stepAt(d) * 2);
+    let hp = 0;
+    for (const [a, b] of [[0, 0], [r, 0], [-r, 0], [0, r], [0, -r]]) {
+      const ddx = dx + a, ddy = dy + b, dd = Math.hypot(ddx, ddy);
+      hp = Math.max(hp, sample(ddx / dd, ddy / dd, dd));
     }
+    if (p.ele && hp < p.ele - 400) hp = Math.max(hp, p.ele - 400); // DEM が粗すぎる場合の保険
     const tp = (hp - h0) / d - d * curv;
-    const ux = dx / d / mpp, uy = dy / d / mpp;
     let maxT = -Infinity, s = 80;
     // 山頂直前の自分の斜面で隠れたと誤判定しないよう、手前で打ち切る
-    const end = d - Math.max(4 * mpp, d * 0.04);
+    const end = d - Math.max(4 * stepAt(d), d * 0.04);
     while (s < end) {
-      const h = dem.sample(lx + ux * s, ly + uy * s);
-      const t = (h - h0) / s - s * curv;
-      if (t > maxT) { maxT = t; if (t > tp + 0.002) break; }
-      s += Math.max(mpp * 0.5, s * 0.0015);
+      const t = (sample(ex, ey, s) - h0) / s - s * curv;
+      if (t > maxT) { maxT = t; if (t > tp + 0.003) break; }
+      s += stepAt(s);
     }
     if (tp < maxT - 0.003) continue; // 隠れている
-    const az = ((Math.atan2(dx, -dy) / D2R) + 360) % 360;
+    const az = ((Math.atan2(ex, -ey) / D2R) + 360) % 360;
     out.push({ ...p, distance: d, azimuth: az, angle: Math.atan(tp) / D2R, demElev: hp });
   }
   return out;
@@ -108,7 +131,7 @@ export function visiblePeaks(dem, hz, peaks) {
  * 必ずスカイライン上にある。
  */
 export function findHighestRidge(hz, { minDist = 500, maxSpanDeg = 120 } = {}) {
-  const { n, dist, elev, h0, mpp } = hz;
+  const { n, dist, elev, h0 } = hz;
   let best = -1;
   for (let i = 0; i < n; i++) {
     if (dist[i] < minDist) continue;
@@ -128,7 +151,7 @@ export function findHighestRidge(hz, { minDist = 500, maxSpanDeg = 120 } = {}) {
     for (let s = 1; s <= maxSteps; s++) {
       const j = (best + dir * s + n) % n;
       const jump = Math.abs(dist[j] - dist[prev]);
-      if (jump > dist[prev] * 0.15 + 3 * mpp) break; // 手前/奥の別の地形に切り替わった
+      if (jump > dist[prev] * 0.15 + 300) break; // 手前/奥の別の地形に切り替わった
       if (elev[j] < floorH) break;
       out.push(j);
       prev = j;
@@ -139,7 +162,8 @@ export function findHighestRidge(hz, { minDist = 500, maxSpanDeg = 120 } = {}) {
   const right = walk(1);
   const indices = [...left, best, ...right];
 
-  const [plon, plat] = pixelToLonLat(hz.px[best], hz.py[best], hz.z);
+  const az = best * hz.azStep * D2R;
+  const [plon, plat] = hz.sampler.toLonLat(Math.sin(az), -Math.cos(az), dist[best]);
   return {
     peakIndex: best,
     indices,
@@ -149,34 +173,6 @@ export function findHighestRidge(hz, { minDist = 500, maxSpanDeg = 120 } = {}) {
     distance: dist[best],
     lat: plat, lon: plon,
   };
-}
-
-// OpenStreetMap (Overpass API) から山頂付近の山名を取得 (失敗しても null)
-export async function lookupPeakName(lat, lon, radius = 2000) {
-  const q = `[out:json][timeout:10];node["natural"="peak"](around:${radius},${lat.toFixed(5)},${lon.toFixed(5)});out body;`;
-  try {
-    const ctl = new AbortController();
-    const timer = setTimeout(() => ctl.abort(), 12000);
-    const res = await fetch('https://overpass-api.de/api/interpreter', {
-      method: 'POST', body: 'data=' + encodeURIComponent(q), signal: ctl.signal,
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    });
-    clearTimeout(timer);
-    if (!res.ok) return null;
-    const js = await res.json();
-    let best = null, bestScore = -Infinity;
-    for (const el of js.elements || []) {
-      const name = el.tags?.['name:ja'] || el.tags?.name;
-      if (!name) continue;
-      const ele = parseFloat(el.tags.ele) || 0;
-      const dLat = (el.lat - lat) * 111320, dLon = (el.lon - lon) * 111320 * Math.cos(lat * D2R);
-      const score = ele - Math.hypot(dLat, dLon) * 0.3; // 高くて近いものを優先
-      if (score > bestScore) { bestScore = score; best = { name, ele: ele || null }; }
-    }
-    return best;
-  } catch {
-    return null;
-  }
 }
 
 // 半径内の名前付き山頂を OSM から一括取得 (失敗時は null)

@@ -26,17 +26,24 @@ export function metersPerPixel(lat, z) {
   return (156543.03392 * Math.cos(lat * D2R)) / 2 ** z;
 }
 
-async function loadTile(z, x, y) {
-  const res = await fetch(TILE_URL(z, x, y), { mode: 'cors' });
-  if (!res.ok) throw new Error(`tile ${z}/${x}/${y}: HTTP ${res.status}`);
+// 国土地理院 標高タイル (DEM10B, 地表面=建物を含まない)。日本国内のみ
+const GSI_URL = (z, x, y) => `https://cyberjapandata.gsi.go.jp/xyz/dem_png/${z}/${x}/${y}.png`;
+
+async function fetchPixels(url) {
+  const res = await fetch(url, { mode: 'cors' });
+  if (!res.ok) throw new Error(`${url}: HTTP ${res.status}`);
   const blob = await res.blob();
-  const bmp = await createImageBitmap(blob);
+  // 色空間変換・アルファ乗算をしない (標高値が壊れないように)
+  const bmp = await createImageBitmap(blob, { colorSpaceConversion: 'none', premultiplyAlpha: 'none' });
   const cv = typeof OffscreenCanvas !== 'undefined'
     ? new OffscreenCanvas(TILE_SIZE, TILE_SIZE)
     : Object.assign(document.createElement('canvas'), { width: TILE_SIZE, height: TILE_SIZE });
   const ctx = cv.getContext('2d', { willReadFrequently: true });
   ctx.drawImage(bmp, 0, 0);
-  const d = ctx.getImageData(0, 0, TILE_SIZE, TILE_SIZE).data;
+  return ctx.getImageData(0, 0, TILE_SIZE, TILE_SIZE).data;
+}
+
+export function decodeTerrarium(d) {
   const out = new Float32Array(TILE_SIZE * TILE_SIZE);
   for (let i = 0, j = 0; i < out.length; i++, j += 4) {
     const h = d[j] * 256 + d[j + 1] + d[j + 2] / 256 - 32768;
@@ -45,12 +52,42 @@ async function loadTile(z, x, y) {
   return out;
 }
 
+export function decodeGsi(d) {
+  const out = new Float32Array(TILE_SIZE * TILE_SIZE);
+  for (let i = 0, j = 0; i < out.length; i++, j += 4) {
+    const x = d[j] * 65536 + d[j + 1] * 256 + d[j + 2];
+    let h = x === 8388608 ? 0 : (x > 8388608 ? x - 16777216 : x) * 0.01; // 2^23 は欠測 (海など)
+    out[i] = h > 0 ? h : 0;
+  }
+  return out;
+}
+
+function inJapan(z, x, y) {
+  const n = 2 ** z;
+  const lon = ((x + 0.5) / n) * 360 - 180;
+  const lat = Math.atan(Math.sinh(Math.PI * (1 - (2 * (y + 0.5)) / n))) / D2R;
+  return lat > 20 && lat < 46.5 && lon > 122 && lon < 154.5;
+}
+
+// 日本国内は国土地理院 (地表面)、それ以外・取得失敗時は AWS Terrain Tiles (建物を一部含む)
+async function loadTile(z, x, y) {
+  if (inJapan(z, x, y)) {
+    try {
+      return { data: decodeGsi(await fetchPixels(GSI_URL(z, x, y))), source: 'gsi' };
+    } catch (e) {
+      // 海だけのタイルは 404 になる → AWS で補う
+    }
+  }
+  return { data: decodeTerrarium(await fetchPixels(TILE_URL(z, x, y))), source: 'aws' };
+}
+
 export class DEM {
   constructor(z) {
     this.z = z;
     this.grid = [];
     this.tx0 = 0; this.ty0 = 0; this.nx = 0; this.ny = 0;
     this.maxElev = 0;
+    this.sources = { gsi: 0, aws: 0 };
   }
 
   async loadArea(lat, lon, radiusM, onProgress) {
@@ -72,18 +109,19 @@ export class DEM {
       while (next < jobs.length) {
         const [i, j] = jobs[next++];
         try {
-          const t = await loadTile(z, this.tx0 + i, this.ty0 + j);
+          const { data: t, source } = await loadTile(z, this.tx0 + i, this.ty0 + j);
           this.grid[j * this.nx + i] = t;
+          this.sources[source]++;
           for (let k = 0; k < t.length; k++) if (t[k] > this.maxElev) this.maxElev = t[k];
         } catch (e) {
           failed++;
           console.warn(e);
         }
         done++;
-        onProgress?.(done, jobs.length);
+        onProgress?.(1);
       }
     };
-    await Promise.all(Array.from({ length: 8 }, worker));
+    await Promise.all(Array.from({ length: 6 }, worker));
     if (failed === jobs.length) throw new Error('標高タイルを取得できませんでした');
     return { tiles: jobs.length, failed };
   }
@@ -112,10 +150,17 @@ export class DEM {
   }
 }
 
-// 半径に応じたズームレベル (タイル数を数十枚に抑える)
-export function zoomForRadius(r) {
-  if (r <= 25000) return 12;
-  if (r <= 50000) return 11;
-  if (r <= 100000) return 10;
-  return 9;
+// 近距離は高解像度、遠距離は低解像度の 2 段構成 (タイル数を数十枚に抑える)
+export function layerPlan(radius) {
+  const nearR = Math.min(radius, 20000);
+  const plan = [{ z: 11, maxDist: nearR }];
+  if (radius > nearR) plan.push({ z: radius <= 80000 ? 10 : 9, maxDist: radius });
+  return plan;
+}
+
+export function tileCount(lat, lon, radiusM, z) {
+  const dLat = radiusM / 111320, dLon = radiusM / (111320 * Math.cos(lat * D2R));
+  const [x0, y0] = lonLatToPixel(lon - dLon, Math.min(85, lat + dLat), z);
+  const [x1, y1] = lonLatToPixel(lon + dLon, Math.max(-85, lat - dLat), z);
+  return (Math.floor(x1 / 256) - Math.floor(x0 / 256) + 1) * (Math.floor(y1 / 256) - Math.floor(y0 / 256) + 1);
 }

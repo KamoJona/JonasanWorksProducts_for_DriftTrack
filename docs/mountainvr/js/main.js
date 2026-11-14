@@ -1,5 +1,5 @@
-import { DEM, zoomForRadius } from './terrain.js';
-import { computeHorizon, findHighestRidge, fetchPeaks, visiblePeaks } from './horizon.js';
+import { DEM, layerPlan, tileCount } from './terrain.js';
+import { makeSampler, computeHorizon, findHighestRidge, fetchPeaks, visiblePeaks } from './horizon.js';
 import { OrientationSensor, matFromYawPitch, cameraDirection } from './orientation.js';
 
 const D2R = Math.PI / 180;
@@ -15,7 +15,7 @@ const S = {
   sensor: new OrientationSensor(),
   useSensor: false,
   lat: null, lon: null,
-  radius: 40000, eyeHeight: 1.7,
+  radius: 150000, eyeHeight: 1.7,
   hz: null, ridge: null, peakName: null,
   angleDeg: null,
   yawOffset: 0, pitchOffset: 0,   // 手動補正 (度)
@@ -63,7 +63,7 @@ function getPosition() {
 
 async function start(mode) {
   S.mode = mode;
-  S.radius = parseInt($('in-radius').value, 10) || 40000;
+  S.radius = parseInt($('in-radius').value, 10) || 150000;
   S.eyeHeight = parseFloat($('in-eye').value) || 1.7;
   $('start').hidden = true;
   $('hud').hidden = false;
@@ -104,21 +104,27 @@ async function compute() {
   setStatus('現在地を取得中…');
   const pos = await getPosition();
   S.lat = pos.lat; S.lon = pos.lon;
-  const z = zoomForRadius(S.radius);
-  const dem = new DEM(z);
-  S.dem = dem;
-  S.peaks = [];
+  const plan = layerPlan(S.radius);
   const peaksPromise = fetchPeaks(S.lat, S.lon, S.radius); // 標高データと並行して取得
-  setStatus('標高データを読み込み中…');
-  await dem.loadArea(S.lat, S.lon, S.radius, (d, t) => setStatus(`標高データを読み込み中… ${d}/${t}`));
+  S.peaks = [];
+  const total = plan.reduce((a, l) => a + tileCount(S.lat, S.lon, l.maxDist, l.z), 0);
+  let done = 0;
+  const layers = [];
+  for (const l of plan) {
+    const dem = new DEM(l.z);
+    await dem.loadArea(S.lat, S.lon, l.maxDist, () => setStatus(`標高データを読み込み中… ${++done}/${total}`));
+    layers.push({ dem, maxDist: l.maxDist });
+  }
   setStatus('稜線を計算中…');
   await new Promise((r) => setTimeout(r, 30));
   const t0 = performance.now();
-  S.hz = computeHorizon(dem, S.lat, S.lon, { radius: S.radius, eyeHeight: S.eyeHeight });
+  const sampler = makeSampler(layers, S.lat, S.lon);
+  S.hz = computeHorizon(sampler, { radius: S.radius, eyeHeight: S.eyeHeight });
+  S.demNote = sampler.dsm ? '標高: AWS (建物補正あり)' : '標高: 国土地理院 (地表面)';
   S.angleDeg = Float32Array.from(S.hz.angle, (a) => a / D2R);
   S.ridge = findHighestRidge(S.hz);
   S.peakName = null;
-  console.log(`horizon: ${(performance.now() - t0).toFixed(0)} ms, z=${z}`, S.ridge);
+  console.log(`horizon: ${(performance.now() - t0).toFixed(0)} ms`, layers.map((l) => [l.dem.z, l.dem.sources]), S.ridge);
   if (!S.ridge) throw new Error('見える山が見つかりませんでした');
   if (S.mode === 'sim' || !S.useSensor) {
     S.simYaw = S.ridge.azimuth;
@@ -128,7 +134,7 @@ async function compute() {
   setStatus('山名を取得中…');
   const all = await peaksPromise;
   if (all) {
-    S.peaks = visiblePeaks(dem, S.hz, all);
+    S.peaks = visiblePeaks(S.hz, all);
     // 最高峰の山名: 稜線の最高点に最も近い山頂
     let best = null, bestD = 2500;
     for (const p of all) {
@@ -173,7 +179,7 @@ function updateInfo() {
   $('peak-detail').textContent =
     `${ele} ・ ${(r.distance / 1000).toFixed(1)} km ・ ${dirName(r.azimuth)} ${r.azimuth.toFixed(0)}°`;
   $('here').textContent =
-    `現在地 ${S.lat.toFixed(4)}, ${S.lon.toFixed(4)} ・ 標高 約 ${Math.round(S.hz.ground)} m ・ 半径 ${S.radius / 1000} km`;
+    `現在地 ${S.lat.toFixed(4)}, ${S.lon.toFixed(4)} ・ 標高 約 ${Math.round(S.hz.ground)} m ・ 半径 ${S.radius / 1000} km ・ ${S.demNote}`;
 }
 
 function screenAngle() {
